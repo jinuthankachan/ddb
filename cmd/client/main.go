@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -17,6 +19,7 @@ func main() {
 	operation := flag.String("op", "", "Operation: get, set, delete")
 	key := flag.String("key", "", "Key")
 	value := flag.String("value", "", "Value (for set operation)")
+	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 
 	if *operation == "" || *key == "" {
@@ -42,7 +45,13 @@ func main() {
 		}
 		method = http.MethodPost
 		url = fmt.Sprintf("http://%s/kv/%s", *nodeAddr, *key)
-		body = bytes.NewBufferString(*value)
+		// Using a JSON structure for the value
+		jsonValue, err := json.Marshal(map[string]string{"value": *value})
+		if err != nil {
+			fmt.Printf("Error marshaling JSON: %v\n", err)
+			os.Exit(1)
+		}
+		body = bytes.NewBuffer(jsonValue)
 
 	case "delete":
 		method = http.MethodDelete
@@ -56,7 +65,7 @@ func main() {
 
 	// Create HTTP client with timeout
 	client := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: 30 * time.Second,
 	}
 
 	// Create request
@@ -64,6 +73,18 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error creating request: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Add appropriate headers
+	if method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	if *debug {
+		log.Printf("DEBUG: Sending %s request to %s", method, url)
+		if body != nil {
+			log.Printf("DEBUG: Request body: %v", body)
+		}
 	}
 
 	// Send request
@@ -78,6 +99,19 @@ func main() {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Printf("Error reading response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *debug {
+		log.Printf("DEBUG: Received status code: %d", resp.StatusCode)
+		log.Printf("DEBUG: Response headers: %v", resp.Header)
+		log.Printf("DEBUG: Response body: %s", string(respBody))
+	}
+
+	// Check status code
+	if resp.StatusCode >= 400 {
+		fmt.Printf("Error: %s\n", resp.Status)
+		fmt.Printf("Response: %s\n", string(respBody))
 		os.Exit(1)
 	}
 

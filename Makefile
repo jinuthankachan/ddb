@@ -23,7 +23,7 @@ run-client:
 		--node $(NODE) \
 		--op $(OP) \
 		--key $(KEY) \
-		--value "$(VALUE)"
+		--value $(VALUE)
 
 # Example usage:
 # Run node:

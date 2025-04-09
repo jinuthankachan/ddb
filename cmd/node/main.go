@@ -59,6 +59,7 @@ func main() {
 			}
 			return fmt.Errorf("message handler not initialized yet")
 		},
+		kvStore, // Pass the KV store to the network manager
 	)
 
 	// Calculate total nodes

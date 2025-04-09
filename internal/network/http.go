@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jinuthankachan/ddb/internal/kvstore"
 	"github.com/jinuthankachan/ddb/internal/pbft"
 )
 
@@ -22,20 +23,23 @@ type NetworkManager struct {
 	peerAddrs  map[string]string // Map node ID to address
 	listenAddr string
 	handleFunc func(senderID string, msgType string, msgBytes []byte) error
+	kvStore    *kvstore.SafeKVStore // Reference to the key-value store
 	mu         sync.RWMutex // For thread-safe peer access
 }
 
 // NewNetworkManager creates a new network manager
 func NewNetworkManager(nodeID, listenAddr string, peerAddrs map[string]string,
-	msgHandler func(senderID string, msgType string, msgBytes []byte) error) *NetworkManager {
+	msgHandler func(senderID string, msgType string, msgBytes []byte) error,
+	kvStore *kvstore.SafeKVStore) *NetworkManager {
 
 	return &NetworkManager{
 		nodeID:     nodeID,
 		listenAddr: listenAddr,
 		peerAddrs:  peerAddrs,
 		handleFunc: msgHandler,
+		kvStore:    kvStore,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second, // Reasonable default timeout
+			Timeout: 10 * time.Second, // Increased timeout
 		},
 	}
 }
@@ -48,7 +52,7 @@ func (nm *NetworkManager) Start() error {
 	mux.HandleFunc("/pbft/message", nm.handlePBFTMessage)
 
 	// Handler for client requests (if this node exposes client endpoints)
-	mux.HandleFunc("/kv", nm.handleClientRequest)
+	mux.HandleFunc("/kv/", nm.handleClientRequest)
 
 	nm.httpServer = &http.Server{
 		Addr:         nm.listenAddr,
@@ -109,10 +113,18 @@ func (nm *NetworkManager) handlePBFTMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Pass the message to the PBFT engine
-	if err := nm.handleFunc(baseMsg.SenderID, baseMsg.Type, body); err != nil {
-		http.Error(w, fmt.Sprintf("Error processing message: %v", err), http.StatusInternalServerError)
-		return
+	// Special handling for REPLY messages
+	if baseMsg.Type == string(pbft.TypeReply) {
+		// REPLY messages are sent to clients, not processed by the PBFT engine
+		// Just acknowledge receipt without forwarding to the PBFT engine
+		fmt.Printf("Node %s received REPLY message from %s, acknowledging without processing\n", 
+			nm.nodeID, baseMsg.SenderID)
+	} else {
+		// Pass all other message types to the PBFT engine
+		if err := nm.handleFunc(baseMsg.SenderID, baseMsg.Type, body); err != nil {
+			http.Error(w, fmt.Sprintf("Error processing message: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Acknowledge receipt with 202 Accepted
@@ -276,10 +288,25 @@ func (nm *NetworkManager) handleClientRequest(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		op = pbft.Operation{
-			Type:  "SET",
-			Key:   key,
-			Value: body,
+		// Try to parse the body as JSON with a "value" field
+		var jsonData struct {
+			Value string `json:"value"`
+		}
+		
+		if err := json.Unmarshal(body, &jsonData); err == nil && jsonData.Value != "" {
+			// Successfully parsed JSON with a value field
+			op = pbft.Operation{
+				Type:  "SET",
+				Key:   key,
+				Value: []byte(jsonData.Value),
+			}
+		} else {
+			// Fall back to using the raw body as the value
+			op = pbft.Operation{
+				Type:  "SET",
+				Key:   key,
+				Value: body,
+			}
 		}
 
 	case http.MethodDelete:
@@ -302,9 +329,32 @@ func (nm *NetworkManager) handleClientRequest(w http.ResponseWriter, r *http.Req
 	// For GET operations, we can read directly from the local store for simplicity
 	// In a production system, you might want consensus on reads too
 	if op.Type == "GET" {
-		// This requires access to the KV store - we'll need to refactor for this
-		// For now, let's just acknowledge that this would be processed here
-		w.Write([]byte("GET operations would be processed locally"))
+		if nm.kvStore == nil {
+			http.Error(w, "KV store not initialized", http.StatusInternalServerError)
+			return
+		}
+
+		value, exists := nm.kvStore.Get(key)
+		
+		w.Header().Set("Content-Type", "application/json")
+		
+		if !exists {
+			// Key not found
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{
+				"status": "error",
+				"error":  "Key not found",
+			})
+			return
+		}
+		
+		// Key found, return the value
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "success",
+			"key":    key,
+			"value":  string(value),
+		})
 		return
 	}
 
@@ -317,6 +367,12 @@ func (nm *NetworkManager) handleClientRequest(w http.ResponseWriter, r *http.Req
 
 	// In a real system, we'd wait for consensus before responding
 	// For now, just acknowledge receipt
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte("Request accepted for processing"))
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "accepted",
+		"message": "Request accepted for processing",
+		"key":     key,
+		"op":      op.Type,
+	})
 }
