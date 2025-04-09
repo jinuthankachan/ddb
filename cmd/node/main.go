@@ -44,8 +44,8 @@ func main() {
 	// Create KV Store
 	kvStore := kvstore.NewSafeKVStore()
 
-	// Create a channel for message handling
-	msgHandlerCh := make(chan func(), 100)
+	// Create a temporary message handler that will be updated once the node is created
+	var messageHandler func(senderID, msgType string, msgBytes []byte) error
 
 	// Create network manager
 	networkManager := network.NewNetworkManager(
@@ -53,8 +53,11 @@ func main() {
 		*listenAddr,
 		peers,
 		func(senderID, msgType string, msgBytes []byte) error {
-			// Forward to the PBFT node for processing
-			return node.HandleMessage(senderID, msgType, msgBytes)
+			// Forward to the PBFT node for processing when handler is available
+			if messageHandler != nil {
+				return messageHandler(senderID, msgType, msgBytes)
+			}
+			return fmt.Errorf("message handler not initialized yet")
 		},
 	)
 
@@ -77,6 +80,10 @@ func main() {
 	}
 
 	// Start PBFT node
+	// Update the message handler to use the node's handler
+	messageHandler = node.HandleMessage
+
+	// Start PBFT node
 	node.Start()
 
 	fmt.Printf("Node %s started. Press Ctrl+C to exit.\n", *nodeID)
@@ -87,5 +94,7 @@ func main() {
 	<-sigCh
 
 	fmt.Println("Shutting down...")
+	// Stop in reverse order of initialization
+	node.Stop()
 	networkManager.Stop()
 }

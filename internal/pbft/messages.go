@@ -157,13 +157,14 @@ func NewCommitMessage(view, seq uint64, nodeID, digest string) *CommitMessage {
 }
 
 // NewReplyMessage creates a new REPLY message
-func NewReplyMessage(view uint64, nodeID, clientID string, result []byte, status string) *ReplyMessage {
+func NewReplyMessage(view, seq uint64, nodeID, clientID string, result []byte, status string) *ReplyMessage {
 	return &ReplyMessage{
 		BaseMessage: BaseMessage{
-			Type:      TypeReply,
-			View:      view,
-			SenderID:  nodeID,
-			Timestamp: time.Now().UnixNano(),
+			Type:           TypeReply,
+			View:           view,
+			SequenceNumber: seq,
+			SenderID:       nodeID,
+			Timestamp:      time.Now().UnixNano(),
 		},
 		ClientID:     clientID,
 		Result:       result,

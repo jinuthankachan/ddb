@@ -30,6 +30,11 @@ type Node struct {
 	preparedCh    chan *PrepareMessage
 	committedCh   chan *CommitMessage
 
+	// Shutdown signaling
+	stopCh   chan struct{}
+	stopped  bool
+	stopOnce sync.Once
+
 	// Additional synchronization
 	mu sync.RWMutex
 }
@@ -49,6 +54,8 @@ func NewNode(id string, kvStore *kvstore.SafeKVStore, networkManager NetworkMana
 		prepreparedCh:  make(chan *PrePrepareMessage, 100),
 		preparedCh:     make(chan *PrepareMessage, 100),
 		committedCh:    make(chan *CommitMessage, 100),
+		stopCh:         make(chan struct{}),
+		stopped:        false,
 	}
 
 	// Determine if this node is the initial primary (view 0)
@@ -68,6 +75,23 @@ func (n *Node) Start() {
 	go n.processCommitMessages()
 }
 
+// Stop gracefully shuts down the PBFT node
+func (n *Node) Stop() {
+	n.stopOnce.Do(func() {
+		fmt.Printf("Stopping PBFT node %s\n", n.ID)
+		
+		// Signal all goroutines to stop
+		close(n.stopCh)
+		
+		n.mu.Lock()
+		n.stopped = true
+		n.mu.Unlock()
+		
+		// Note: We intentionally don't close the message channels here
+		// as they might still be receiving messages from the network layer.
+		// The goroutines will exit when they detect the stop signal.
+	})
+}
 // HandleMessage processes an incoming PBFT message
 func (n *Node) HandleMessage(senderID, msgType string, msgBytes []byte) error {
 	switch MessageType(msgType) {
@@ -110,136 +134,167 @@ func (n *Node) HandleMessage(senderID, msgType string, msgBytes []byte) error {
 
 // processClientRequests handles incoming client requests (primary only)
 func (n *Node) processClientRequests() {
-	for req := range n.requestCh {
-		// Only the primary processes client requests
-		if !n.isPrimary {
-			fmt.Printf("Node %s (not primary) received client request, forwarding to primary\n", n.ID)
-			primaryID := n.getPrimaryForView(n.state.View)
-			n.networkManager.SendMessageToPeer(primaryID, req)
-			continue
+	for {
+		select {
+		case <-n.stopCh:
+			return // Exit when stop signal received
+		case req, ok := <-n.requestCh:
+			if !ok {
+				return // Channel closed
+			}
+			if !n.isPrimary {
+				fmt.Printf("Node %s (not primary) received client request, forwarding to primary\n", n.ID)
+				primaryID := n.getPrimaryForView(n.state.View)
+				n.networkManager.SendMessageToPeer(primaryID, req)
+				continue
+			}
+
+			// Assign a sequence number and start the consensus process
+			n.mu.Lock()
+			seq := n.state.NextSequence
+			n.state.NextSequence++
+			n.mu.Unlock()
+
+			// Create and send PRE-PREPARE message
+			prePrepare := NewPrePrepareMessage(n.state.View, seq, n.ID, req)
+
+			fmt.Printf("Node %s (primary) broadcasting PRE-PREPARE for seq %d\n", n.ID, seq)
+			n.state.LogPrePrepare(prePrepare)
+			n.networkManager.BroadcastMessage(prePrepare)
 		}
-
-		// Assign a sequence number and start the consensus process
-		n.mu.Lock()
-		seq := n.state.NextSequence
-		n.state.NextSequence++
-		n.mu.Unlock()
-
-		// Create and send PRE-PREPARE message
-		prePrepare := NewPrePrepareMessage(n.state.View, seq, n.ID, req)
-
-		fmt.Printf("Node %s (primary) broadcasting PRE-PREPARE for seq %d\n", n.ID, seq)
-		n.state.LogPrePrepare(prePrepare)
-		n.networkManager.BroadcastMessage(prePrepare)
 	}
 }
 
 // processPrePrepareMessages handles PRE-PREPARE messages (backups)
 func (n *Node) processPrePrepareMessages() {
-	for msg := range n.prepreparedCh {
-		// Verify the message is from the current primary
-		primaryID := n.getPrimaryForView(msg.View)
-		if msg.SenderID != primaryID {
-			fmt.Printf("Node %s received PRE-PREPARE from non-primary %s, ignoring\n",
-				n.ID, msg.SenderID)
-			continue
-		}
+	for {
+		select {
+		case <-n.stopCh:
+			return // Exit when stop signal received
+		case msg, ok := <-n.prepreparedCh:
+			if !ok {
+				return // Channel closed
+			}
+			// Verify the message is from the current primary
+			primaryID := n.getPrimaryForView(msg.View)
+			if msg.SenderID != primaryID {
+				fmt.Printf("Node %s received PRE-PREPARE from non-primary %s, ignoring\n",
+					n.ID, msg.SenderID)
+				continue
+			}
 
-		// Verify the view matches our current view
-		if msg.View != n.state.View {
-			fmt.Printf("Node %s received PRE-PREPARE for view %d, but current view is %d\n",
-				n.ID, msg.View, n.state.View)
-			continue
-		}
+			// Verify the view matches our current view
+			if msg.View != n.state.View {
+				fmt.Printf("Node %s received PRE-PREPARE for view %d, but current view is %d\n",
+					n.ID, msg.View, n.state.View)
+				continue
+			}
 
-		// Verify we haven't already processed this sequence number
-		if n.state.HasPrePrepared(msg.View, msg.SequenceNumber) {
-			fmt.Printf("Node %s already processed PRE-PREPARE for view %d, seq %d\n",
-				n.ID, msg.View, msg.SequenceNumber)
-			continue
-		}
-
-		// Verify the request digest matches the request
-		if msg.Request != nil {
-			computedDigest := ComputeDigest(msg.Request)
-			if computedDigest != msg.RequestDigest {
-				fmt.Printf("Node %s detected digest mismatch for PRE-PREPARE view %d, seq %d\n",
+			// Verify we haven't already processed this sequence number
+			if n.state.HasPrePrepared(msg.View, msg.SequenceNumber) {
+				fmt.Printf("Node %s already processed PRE-PREPARE for view %d, seq %d\n",
 					n.ID, msg.View, msg.SequenceNumber)
 				continue
 			}
+
+			// Verify the request digest matches the request
+			if msg.Request != nil {
+				computedDigest := ComputeDigest(msg.Request)
+				if computedDigest != msg.RequestDigest {
+					fmt.Printf("Node %s detected digest mismatch for PRE-PREPARE view %d, seq %d\n",
+						n.ID, msg.View, msg.SequenceNumber)
+					continue
+				}
+			}
+
+			// Log the PRE-PREPARE message
+			n.state.LogPrePrepare(msg)
+
+			// Send PREPARE message
+			prepare := NewPrepareMessage(msg.View, msg.SequenceNumber, n.ID, msg.RequestDigest)
+			fmt.Printf("Node %s sending PREPARE for view %d, seq %d\n",
+				n.ID, msg.View, msg.SequenceNumber)
+			n.state.LogPrepare(prepare)
+			n.networkManager.BroadcastMessage(prepare)
 		}
-
-		// Log the PRE-PREPARE message
-		n.state.LogPrePrepare(msg)
-
-		// Send PREPARE message
-		prepare := NewPrepareMessage(msg.View, msg.SequenceNumber, n.ID, msg.RequestDigest)
-		fmt.Printf("Node %s sending PREPARE for view %d, seq %d\n",
-			n.ID, msg.View, msg.SequenceNumber)
-		n.state.LogPrepare(prepare)
-		n.networkManager.BroadcastMessage(prepare)
 	}
 }
-
 // processPrepareMessages handles PREPARE messages
 func (n *Node) processPrepareMessages() {
-	for msg := range n.preparedCh {
-		// Verify the view matches our current view
-		if msg.View != n.state.View {
-			fmt.Printf("Node %s received PREPARE for view %d, but current view is %d\n",
-				n.ID, msg.View, n.state.View)
-			continue
-		}
+	for {
+		select {
+		case <-n.stopCh:
+			return // Exit when stop signal received
+		case msg, ok := <-n.preparedCh:
+			if !ok {
+				return // Channel closed
+			}
+			// Verify the view matches our current view
+			if msg.View != n.state.View {
+				fmt.Printf("Node %s received PREPARE for view %d, but current view is %d\n",
+					n.ID, msg.View, n.state.View)
+				continue
+			}
 
-		// Log the PREPARE message
-		n.state.LogPrepare(msg)
+			// Log the PREPARE message
+			n.state.LogPrepare(msg)
 
-		// Check if we have enough PREPARE messages to enter the prepared state
-		if n.state.HasPrepared(msg.View, msg.SequenceNumber, msg.RequestDigest) {
-			// Send COMMIT message
-			commit := NewCommitMessage(msg.View, msg.SequenceNumber, n.ID, msg.RequestDigest)
-			fmt.Printf("Node %s sending COMMIT for view %d, seq %d\n",
-				n.ID, msg.View, msg.SequenceNumber)
-			n.state.LogCommit(commit)
-			n.networkManager.BroadcastMessage(commit)
+			// Check if we have enough PREPARE messages to enter the prepared state
+			if n.state.HasPrepared(msg.View, msg.SequenceNumber, msg.RequestDigest) {
+				// Send COMMIT message
+				commit := NewCommitMessage(msg.View, msg.SequenceNumber, n.ID, msg.RequestDigest)
+				fmt.Printf("Node %s sending COMMIT for view %d, seq %d\n",
+					n.ID, msg.View, msg.SequenceNumber)
+				n.state.LogCommit(commit)
+				n.networkManager.BroadcastMessage(commit)
+			}
 		}
 	}
 }
 
 // processCommitMessages handles COMMIT messages
 func (n *Node) processCommitMessages() {
-	for msg := range n.committedCh {
-		// Verify the view matches our current view
-		if msg.View != n.state.View {
-			fmt.Printf("Node %s received COMMIT for view %d, but current view is %d\n",
-				n.ID, msg.View, n.state.View)
-			continue
-		}
-
-		// Log the COMMIT message
-		n.state.LogCommit(msg)
-
-		// Check if we have enough COMMIT messages to execute the request
-		if n.state.HasCommitted(msg.View, msg.SequenceNumber, msg.RequestDigest) {
-			// Get the original request from our log
-			request := n.state.GetRequest(msg.View, msg.SequenceNumber)
-			if request == nil {
-				fmt.Printf("Node %s cannot find request for committed sequence %d\n",
-					n.ID, msg.SequenceNumber)
+	for {
+		select {
+		case <-n.stopCh:
+			return // Exit when stop signal received
+		case msg, ok := <-n.committedCh:
+			if !ok {
+				return // Channel closed
+			}
+			// Verify the view matches our current view
+			if msg.View != n.state.View {
+				fmt.Printf("Node %s received COMMIT for view %d, but current view is %d\n",
+					n.ID, msg.View, n.state.View)
 				continue
 			}
 
-			// Execute the request against the KV store
-			result, status := n.executeOperation(request.Operation)
+			// Log the COMMIT message
+			n.state.LogCommit(msg)
 
-			fmt.Printf("Node %s executed operation for seq %d: %s %s\n",
-				n.ID, msg.SequenceNumber, request.Operation.Type, request.Operation.Key)
+			// Check if we have enough COMMIT messages to execute the operation
+			if n.state.HasCommitted(msg.View, msg.SequenceNumber, msg.RequestDigest) {
+				// Get the original request from the state
+				request := n.state.GetRequest(msg.View, msg.SequenceNumber)
+				if request == nil {
+					fmt.Printf("Node %s: Cannot find original request for committed operation v:%d s:%d\n",
+						n.ID, msg.View, msg.SequenceNumber)
+					continue
+				}
 
-			// Send reply to the client
-			reply := NewReplyMessage(msg.View, n.ID, request.ClientID, result, status)
-			// In a real implementation, we would send this directly to the client
-			// For now, we can broadcast it to simulate all nodes replying
-			n.networkManager.BroadcastMessage(reply)
+				// Execute the operation
+				result, status := n.executeOperation(request.Operation)
+
+				fmt.Printf("Node %s executed operation for seq %d: %s %s\n",
+					n.ID, msg.SequenceNumber, request.Operation.Type, request.Operation.Key)
+
+				// Create and send reply to the client
+				reply := NewReplyMessage(msg.View, msg.SequenceNumber, n.ID, request.ClientID, result, status)
+				
+				// In a real implementation, we would send this directly to the client
+				// For now, we can broadcast it to simulate all nodes replying
+				n.networkManager.BroadcastMessage(reply)
+			}
 		}
 	}
 }

@@ -78,7 +78,7 @@ func (nm *NetworkManager) Stop() error {
 	return nm.httpServer.Shutdown(ctx)
 }
 
-// handlePBFTMessage processes incoming PBFT messages
+// handlePBFTMessage processes incoming PBFT protocol messages
 func (nm *NetworkManager) handlePBFTMessage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -119,12 +119,6 @@ func (nm *NetworkManager) handlePBFTMessage(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// handleClientRequest processes incoming client requests (e.g., SET, GET, DELETE)
-func (nm *NetworkManager) handleClientRequest(w http.ResponseWriter, r *http.Request) {
-	// This would be expanded in a real implementation
-	// For now, just return a not implemented error
-	http.Error(w, "Client API not implemented yet", http.StatusNotImplemented)
-}
 
 // BroadcastMessage sends a PBFT message to all peers
 func (nm *NetworkManager) BroadcastMessage(message interface{}) error {
@@ -297,6 +291,13 @@ func (nm *NetworkManager) handleClientRequest(w http.ResponseWriter, r *http.Req
 
 	// Create a request message
 	request := pbft.NewRequestMessage(clientID, op)
+	
+	// Marshal the request to JSON bytes
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error marshaling request: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	// For GET operations, we can read directly from the local store for simplicity
 	// In a production system, you might want consensus on reads too
@@ -308,7 +309,7 @@ func (nm *NetworkManager) handleClientRequest(w http.ResponseWriter, r *http.Req
 	}
 
 	// Pass to the message handler (in a real system, we'd wait for the reply)
-	err := nm.handleFunc(clientID, string(pbft.TypeRequest), msgBytes)
+	err = nm.handleFunc(clientID, string(pbft.TypeRequest), requestBytes)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error processing request: %v", err), http.StatusInternalServerError)
 		return
