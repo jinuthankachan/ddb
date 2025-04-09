@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/your-username/distributed-kv-store/internal/kvstore"
+	"github.com/jinuthankachan/ddb/internal/kvstore"
 )
 
 // Interface for the network layer

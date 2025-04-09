@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/jinuthankachan/ddb/internal/pbft"
 )
 
 // NetworkManager handles HTTP communication between nodes
@@ -240,4 +243,79 @@ func (nm *NetworkManager) UpdatePeers(peerAddrs map[string]string) {
 	for id, addr := range peerAddrs {
 		nm.peerAddrs[id] = addr
 	}
+}
+
+// handleClientRequest processes incoming client requests (e.g., SET, GET, DELETE)
+func (nm *NetworkManager) handleClientRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract key from URL path
+	key := strings.TrimPrefix(r.URL.Path, "/kv/")
+	if key == "" && r.Method != http.MethodGet {
+		http.Error(w, "Key is required", http.StatusBadRequest)
+		return
+	}
+
+	var op pbft.Operation
+	clientID := "external-client" // In a real system, we'd authenticate clients
+
+	switch r.Method {
+	case http.MethodGet:
+		if key == "" {
+			// List all keys - this would require a new operation type
+			http.Error(w, "Listing all keys not implemented", http.StatusNotImplemented)
+			return
+		}
+		op = pbft.Operation{
+			Type: "GET",
+			Key:  key,
+		}
+
+	case http.MethodPost:
+		body, err := io.ReadAll(r.Body)
+		defer r.Body.Close()
+		if err != nil {
+			http.Error(w, "Error reading request body", http.StatusBadRequest)
+			return
+		}
+
+		op = pbft.Operation{
+			Type:  "SET",
+			Key:   key,
+			Value: body,
+		}
+
+	case http.MethodDelete:
+		op = pbft.Operation{
+			Type: "DELETE",
+			Key:  key,
+		}
+	}
+
+	// Create a request message
+	request := pbft.NewRequestMessage(clientID, op)
+
+	// For GET operations, we can read directly from the local store for simplicity
+	// In a production system, you might want consensus on reads too
+	if op.Type == "GET" {
+		// This requires access to the KV store - we'll need to refactor for this
+		// For now, let's just acknowledge that this would be processed here
+		w.Write([]byte("GET operations would be processed locally"))
+		return
+	}
+
+	// Pass to the message handler (in a real system, we'd wait for the reply)
+	err := nm.handleFunc(clientID, string(pbft.TypeRequest), msgBytes)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error processing request: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// In a real system, we'd wait for consensus before responding
+	// For now, just acknowledge receipt
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte("Request accepted for processing"))
 }

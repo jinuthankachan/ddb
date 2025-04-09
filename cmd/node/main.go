@@ -8,9 +8,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/your-username/distributed-kv-store/internal/kvstore"
-	"github.com/your-username/distributed-kv-store/internal/network"
-	"github.com/your-username/distributed-kv-store/internal/pbft"
+	"github.com/jinuthankachan/ddb/internal/kvstore"
+	"github.com/jinuthankachan/ddb/internal/network"
+	"github.com/jinuthankachan/ddb/internal/pbft"
 )
 
 func main() {
