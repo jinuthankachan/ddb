@@ -8,3 +8,4 @@
   * Storage: In-memory
   * Networking: HTTP
   * Purpose: Learning exercise
+* Reference: This is implemented referring [this](./docs/reference.md)
