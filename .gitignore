@@ -1,0 +1,85 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Binary files
+/bin/
+/dist/
+/build/
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Dependency directories
+/vendor/
+/Godeps/
+
+# Go workspace file
+go.work
+
+# Test binary, built with `go test -c`
+*.test
+
+# Debug files
+__debug_bin
+debug
+debug.test
+
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# IDE - GoLand/IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# IDE - vim/neovim
+*.swp
+*.swo
+*~
+
+# OS - macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# OS - Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# OS - Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# Application specific
+*.log
+*.env
+.env*
+!.env.example
+
+# Project specific binaries
+/cmd/node/node
+/cmd/client/client
+/cmd/ddb
+
+# Temporary files
+*.tmp
+*.bak
+
